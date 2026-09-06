@@ -1,0 +1,88 @@
+name: Incus smoke test
+
+on:
+  push:
+    branches:
+      - test/incus-actions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  incus-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Show runner environment
+        run: |
+          set -euxo pipefail
+          uname -a
+          cat /etc/os-release
+          systemd-detect-virt || true
+          id
+          mount | grep cgroup || true
+          ls -l /sys/fs/cgroup | head -30
+
+      - name: Install Incus
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y incus
+          incus version
+          systemctl --no-pager --full status incus.service || true
+
+      - name: Initialize Incus
+        run: |
+          set -euxo pipefail
+          sudo incus admin init --minimal
+          sudo incus storage list
+          sudo incus network list
+          sudo incus profile show default
+
+      - name: Launch unprivileged container
+        run: |
+          set -euxo pipefail
+          sudo incus launch images:ubuntu/24.04 incus-smoke
+          sudo incus list
+          sudo incus info incus-smoke
+
+          # security.privileged is false by default; an empty value here is expected.
+          test -z "$(sudo incus config get incus-smoke security.privileged)"
+
+      - name: Execute inside container
+        run: |
+          set -euxo pipefail
+          sudo incus exec incus-smoke -- sh -euxc '
+            echo "hello from Incus"
+            cat /etc/os-release
+            uname -a
+            id
+            test -f /etc/os-release
+          '
+
+      - name: Verify container networking
+        run: |
+          set -euxo pipefail
+          for attempt in $(seq 1 30); do
+            if sudo incus exec incus-smoke -- getent hosts github.com; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Container did not obtain working DNS/networking" >&2
+          exit 1
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          set +e
+          echo '=== Incus version ==='
+          sudo incus version
+          echo '=== Incus list ==='
+          sudo incus list
+          echo '=== Incus info ==='
+          sudo incus info --show-log incus-smoke
+          echo '=== incus.service journal ==='
+          sudo journalctl -u incus.service --no-pager -n 200

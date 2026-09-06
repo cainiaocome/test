@@ -1,0 +1,115 @@
+name: Incus VM nested KVM test
+
+on:
+  push:
+    branches:
+      - test/incus-actions
+    paths:
+      - .github/workflows/incus-vm-kvm-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  incus-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Inspect nested virtualization support
+        run: |
+          set -euxo pipefail
+          uname -a
+          systemd-detect-virt || true
+          grep -E -m1 'flags|Features' /proc/cpuinfo
+          grep -E -m1 -o '\b(vmx|svm)\b' /proc/cpuinfo
+          ls -l /dev/kvm
+          test -c /dev/kvm
+
+      - name: Install Incus and QEMU/KVM
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            incus \
+            qemu-system-x86 \
+            qemu-utils \
+            ovmf \
+            swtpm \
+            virtiofsd \
+            cpu-checker
+          incus version
+          qemu-system-x86_64 --version
+          sudo kvm-ok
+
+      - name: Initialize Incus
+        run: |
+          set -euxo pipefail
+          sudo incus admin init --minimal
+          sudo incus storage list
+          sudo incus network list
+          sudo incus info
+
+      - name: Launch Incus VM using KVM
+        run: |
+          set -euxo pipefail
+          sudo incus launch images:ubuntu/24.04 incus-kvm-smoke --vm \
+            -c limits.cpu=2 \
+            -c limits.memory=2GiB
+          sudo incus list
+          sudo incus info incus-kvm-smoke
+          test "$(sudo incus config get incus-kvm-smoke security.secureboot)" != "false" || true
+
+      - name: Wait for Incus agent and execute inside VM
+        run: |
+          set -euxo pipefail
+          for attempt in $(seq 1 90); do
+            if sudo incus exec incus-kvm-smoke -- true 2>/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then
+              echo "Incus VM agent did not become ready" >&2
+              exit 1
+            fi
+            sleep 3
+          done
+
+          sudo incus exec incus-kvm-smoke -- sh -euxc '
+            echo "hello from an Incus VM"
+            cat /etc/os-release
+            uname -a
+            id
+            systemd-detect-virt
+            test "$(systemd-detect-virt)" = kvm
+            grep -q hypervisor /proc/cpuinfo
+          '
+
+      - name: Verify VM networking
+        run: |
+          set -euxo pipefail
+          for attempt in $(seq 1 30); do
+            if sudo incus exec incus-kvm-smoke -- getent hosts github.com; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "VM did not obtain working DNS/networking" >&2
+          exit 1
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          set +e
+          echo '=== /dev/kvm ==='
+          ls -l /dev/kvm
+          echo '=== CPU virtualization flags ==='
+          grep -E -m1 -o '\b(vmx|svm)\b' /proc/cpuinfo
+          echo '=== Incus version ==='
+          sudo incus version
+          echo '=== Incus list ==='
+          sudo incus list
+          echo '=== Incus VM info/log ==='
+          sudo incus info --show-log incus-kvm-smoke
+          echo '=== incus.service journal ==='
+          sudo journalctl -u incus.service --no-pager -n 300

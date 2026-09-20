@@ -13,28 +13,30 @@ from sentence_transformers import CrossEncoder
 
 
 DEFAULT_MODEL = "Qwen/Qwen3-Reranker-0.6B"
-DEFAULT_INSTRUCTION = """Judge whether the document is one of the most important files for an AI coding agent trying to understand the repository's core architecture and behavior.
+DEFAULT_INSTRUCTION = """Rank the candidate file path by how important it is for an AI coding agent trying to understand the repository's core architecture and behavior.
 
-Prefer:
+You are given the repository's complete tracked file tree as context, but no file contents. Judge only from path names and the surrounding repository structure.
+
+Prefer paths that are likely to contain:
 - main entry points
 - core business or domain logic
 - central architecture
 - important interfaces and abstractions
 - major configuration that defines application behavior
 
-Deprioritize:
-- generated files
+Deprioritize paths that are likely to be:
+- generated artifacts
 - vendored dependencies
 - lock files
 - trivial utilities
 - examples
-- tests, unless they are essential for understanding behavior
+- tests, unless they appear central to understanding behavior
 """
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Rank tracked files in a git repository with Qwen3-Reranker."
+        description="Rank tracked file paths in a git repository with Qwen3-Reranker."
     )
     parser.add_argument("repo", type=Path, help="Path to a git repository")
     parser.add_argument("--top", type=int, default=20, help="Number of results to print")
@@ -43,30 +45,18 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="GLOB",
-        help="Only rank paths matching this glob. Repeatable.",
+        help="Only rank candidate paths matching this glob. Repeatable.",
     )
     parser.add_argument(
         "--exclude",
         action="append",
         default=[],
         metavar="GLOB",
-        help="Skip paths matching this glob. Repeatable.",
+        help="Skip candidate paths matching this glob. Repeatable.",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--max-length", type=int, default=2048)
-    parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=8000,
-        help="Maximum characters retained from each text file",
-    )
-    parser.add_argument(
-        "--max-file-bytes",
-        type=int,
-        default=512 * 1024,
-        help="Skip files larger than this before decoding",
-    )
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--max-length", type=int, default=8192)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", type=Path, help="Write full ranking as JSON")
@@ -80,83 +70,67 @@ def git_files(repo: Path) -> list[str]:
         check=True,
         capture_output=True,
     )
-    return [item.decode("utf-8") for item in proc.stdout.split(b"\0") if item]
+    return sorted(item.decode("utf-8") for item in proc.stdout.split(b"\0") if item)
 
 
 def matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
-def read_text(path: Path, max_file_bytes: int, max_chars: int) -> str | None:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-
-    if len(data) > max_file_bytes or b"\0" in data[:8192]:
-        return None
-
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-
-    if not text.strip():
-        return None
-
-    if len(text) <= max_chars:
-        return text
-
-    head = max_chars * 2 // 3
-    tail = max_chars - head
-    return text[:head] + "\n\n...[truncated]...\n\n" + text[-tail:]
-
-
 def main() -> None:
     args = parse_args()
     repo = args.repo.resolve()
 
-    if not (repo / ".git").exists():
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
         raise SystemExit(f"not a git repository: {repo}")
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)
 
-    candidates: list[tuple[str, str]] = []
-    for relative in git_files(repo):
-        if args.include and not matches(relative, args.include):
-            continue
-        if args.exclude and matches(relative, args.exclude):
-            continue
-
-        text = read_text(repo / relative, args.max_file_bytes, args.max_chars)
-        if text is None:
-            continue
-
-        document = f"Path: {relative}\n\n{text}"
-        candidates.append((relative, document))
+    all_paths = git_files(repo)
+    candidates = [
+        path
+        for path in all_paths
+        if (not args.include or matches(path, args.include))
+        and not (args.exclude and matches(path, args.exclude))
+    ]
 
     if not candidates:
-        raise SystemExit("no rankable text files matched the requested paths")
+        raise SystemExit("no candidate paths matched the requested filters")
 
-    query = (
-        f"Repository: {repo.name}\n\n"
-        "Goal: understand what this repository does, how it is structured, "
-        "and where its core behavior is implemented."
-    )
+    tree = "\n".join(f"- {path}" for path in all_paths)
+    query = f"""Repository: {repo.name}
 
+Goal:
+Understand what this repository does, how it is structured, and where its core behavior is implemented.
+
+Complete tracked file tree:
+{tree}
+"""
+
+    print(f"Repository context: {len(all_paths)} tracked paths", flush=True)
+    print(f"Candidate paths: {len(candidates)}", flush=True)
     print(f"Loading {args.model} on {args.device} ...", flush=True)
+
     model = CrossEncoder(
         args.model,
-        prompts={"repo-importance": DEFAULT_INSTRUCTION.strip()},
-        default_prompt_name="repo-importance",
+        prompts={"repo-path-importance": DEFAULT_INSTRUCTION.strip()},
+        default_prompt_name="repo-path-importance",
         max_length=args.max_length,
         device=args.device,
     )
 
-    print(f"Ranking {len(candidates)} files ...", flush=True)
+    print("Ranking paths only; file contents are never read.", flush=True)
     scores = model.predict(
-        [(query, document) for _, document in candidates],
+        [(query, f"Candidate path: {path}") for path in candidates],
         batch_size=args.batch_size,
         show_progress_bar=True,
         activation_fn=torch.nn.Sigmoid(),
@@ -165,7 +139,7 @@ def main() -> None:
 
     results = [
         {"path": path, "score": float(score)}
-        for score, (path, _) in zip(scores, candidates, strict=True)
+        for score, path in zip(scores, candidates, strict=True)
     ]
     results.sort(key=lambda item: item["score"], reverse=True)
 
@@ -178,9 +152,12 @@ def main() -> None:
         payload = {
             "model": args.model,
             "repository": str(repo),
+            "mode": "path-only",
             "instruction": DEFAULT_INSTRUCTION.strip(),
-            "query": query,
+            "max_length": args.max_length,
+            "repository_path_count": len(all_paths),
             "candidate_count": len(results),
+            "query": query,
             "results": results,
         }
         args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

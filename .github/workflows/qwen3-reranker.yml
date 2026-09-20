@@ -10,9 +10,9 @@ permissions:
   contents: read
 
 jobs:
-  rank-requests:
+  rank-itsdangerous:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Check out experiment
@@ -38,12 +38,12 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Clone Requests
-        run: git clone --depth 1 https://github.com/psf/requests.git "$RUNNER_TEMP/requests"
+      - name: Clone itsdangerous
+        run: git clone --depth 1 https://github.com/pallets/itsdangerous.git "$RUNNER_TEMP/itsdangerous"
 
-      - name: Rank Requests paths
+      - name: Rank file paths
         run: |
-          python scripts/rank_repo.py "$RUNNER_TEMP/requests" \
+          python scripts/rank_repo.py "$RUNNER_TEMP/itsdangerous" \
             --top 20 \
             --max-length 8192 \
             --batch-size 4 \
@@ -59,8 +59,9 @@ jobs:
           results = data["results"]
 
           assert data["mode"] == "path-only"
+          assert data["max_length"] == 8192
           assert data["repository_path_count"] == data["candidate_count"]
-          assert data["candidate_count"] >= 100, data["candidate_count"]
+          assert data["candidate_count"] >= 40, data["candidate_count"]
           assert len(results) == data["candidate_count"]
           assert all(0.0 <= row["score"] <= 1.0 for row in results)
           assert all(
@@ -69,8 +70,8 @@ jobs:
           )
 
           paths = {row["path"] for row in results}
-          assert "src/requests/sessions.py" in paths
-          assert "tests/certs/expired/ca/ca-private.key" in paths
+          assert "src/itsdangerous/serializer.py" in paths
+          assert "uv.lock" in paths
 
           print("Top 20:")
           for row in results[:20]:

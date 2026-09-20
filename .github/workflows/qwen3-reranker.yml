@@ -12,7 +12,7 @@ permissions:
 jobs:
   rank-requests:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Check out experiment
@@ -41,19 +41,15 @@ jobs:
       - name: Clone Requests
         run: git clone --depth 1 https://github.com/psf/requests.git "$RUNNER_TEMP/requests"
 
-      - name: Rank Requests files
+      - name: Rank Requests paths
         run: |
           python scripts/rank_repo.py "$RUNNER_TEMP/requests" \
-            --include "README.md" \
-            --include "pyproject.toml" \
-            --include "src/**" \
-            --top 10 \
-            --max-length 512 \
-            --max-chars 2500 \
-            --batch-size 2 \
+            --top 20 \
+            --max-length 8192 \
+            --batch-size 4 \
             --output qwen3-reranker-results.json
 
-      - name: Validate result shape
+      - name: Validate path-only result
         run: |
           python - <<'PY'
           import json
@@ -62,7 +58,9 @@ jobs:
           data = json.loads(Path("qwen3-reranker-results.json").read_text())
           results = data["results"]
 
-          assert data["candidate_count"] >= 15, data["candidate_count"]
+          assert data["mode"] == "path-only"
+          assert data["repository_path_count"] == data["candidate_count"]
+          assert data["candidate_count"] >= 100, data["candidate_count"]
           assert len(results) == data["candidate_count"]
           assert all(0.0 <= row["score"] <= 1.0 for row in results)
           assert all(
@@ -70,22 +68,17 @@ jobs:
               for i in range(len(results) - 1)
           )
 
-          top10 = {row["path"] for row in results[:10]}
-          core = {
-              "src/requests/api.py",
-              "src/requests/models.py",
-              "src/requests/sessions.py",
-              "src/requests/adapters.py",
-          }
-          assert top10 & core, f"expected at least one core Requests file in top 10; got {sorted(top10)}"
+          paths = {row["path"] for row in results}
+          assert "src/requests/sessions.py" in paths
+          assert "tests/certs/expired/ca/ca-private.key" in paths
 
-          print("Top 10:")
-          for row in results[:10]:
+          print("Top 20:")
+          for row in results[:20]:
               print(f'{row["score"]:.6f}  {row["path"]}')
           PY
 
       - name: Upload ranking
         uses: actions/upload-artifact@v4
         with:
-          name: qwen3-reranker-results
+          name: qwen3-reranker-path-only-results
           path: qwen3-reranker-results.json

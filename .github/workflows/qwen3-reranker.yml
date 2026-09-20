@@ -12,7 +12,7 @@ permissions:
 jobs:
   rank-requests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Check out experiment
@@ -48,8 +48,8 @@ jobs:
             --include "pyproject.toml" \
             --include "src/**" \
             --top 10 \
-            --max-length 2048 \
-            --max-chars 8000 \
+            --max-length 512 \
+            --max-chars 2500 \
             --batch-size 2 \
             --output qwen3-reranker-results.json
 

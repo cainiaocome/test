@@ -12,7 +12,7 @@ permissions:
 jobs:
   rank-itsdangerous:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     steps:
       - name: Check out experiment
@@ -44,6 +44,10 @@ jobs:
       - name: Rank file paths
         run: |
           python scripts/rank_repo.py "$RUNNER_TEMP/itsdangerous" \
+            --include "README.md" \
+            --include "pyproject.toml" \
+            --include "uv.lock" \
+            --include "src/**" \
             --top 20 \
             --max-length 8192 \
             --batch-size 4 \
@@ -60,8 +64,8 @@ jobs:
 
           assert data["mode"] == "path-only"
           assert data["max_length"] == 8192
-          assert data["repository_path_count"] == data["candidate_count"]
-          assert data["candidate_count"] >= 40, data["candidate_count"]
+          assert data["repository_path_count"] >= 40, data["repository_path_count"]
+          assert 10 <= data["candidate_count"] <= 20, data["candidate_count"]
           assert len(results) == data["candidate_count"]
           assert all(0.0 <= row["score"] <= 1.0 for row in results)
           assert all(
@@ -71,10 +75,11 @@ jobs:
 
           paths = {row["path"] for row in results}
           assert "src/itsdangerous/serializer.py" in paths
+          assert "src/itsdangerous/signer.py" in paths
           assert "uv.lock" in paths
 
-          print("Top 20:")
-          for row in results[:20]:
+          print("Ranking:")
+          for row in results:
               print(f'{row["score"]:.6f}  {row["path"]}')
           PY
 

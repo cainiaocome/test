@@ -1,0 +1,91 @@
+name: Qwen3 repo reranker
+
+on:
+  push:
+    branches:
+      - qwen3-reranker-repo-ranking
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rank-requests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out experiment
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: qwen3-reranker-0.6b-v1
+
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6,<3"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Clone Requests
+        run: git clone --depth 1 https://github.com/psf/requests.git "$RUNNER_TEMP/requests"
+
+      - name: Rank Requests files
+        run: |
+          python scripts/rank_repo.py "$RUNNER_TEMP/requests" \
+            --include "README.md" \
+            --include "pyproject.toml" \
+            --include "src/**" \
+            --top 10 \
+            --max-length 2048 \
+            --max-chars 8000 \
+            --batch-size 2 \
+            --output qwen3-reranker-results.json
+
+      - name: Validate result shape
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("qwen3-reranker-results.json").read_text())
+          results = data["results"]
+
+          assert data["candidate_count"] >= 15, data["candidate_count"]
+          assert len(results) == data["candidate_count"]
+          assert all(0.0 <= row["score"] <= 1.0 for row in results)
+          assert all(
+              results[i]["score"] >= results[i + 1]["score"]
+              for i in range(len(results) - 1)
+          )
+
+          top10 = {row["path"] for row in results[:10]}
+          core = {
+              "src/requests/api.py",
+              "src/requests/models.py",
+              "src/requests/sessions.py",
+              "src/requests/adapters.py",
+          }
+          assert top10 & core, f"expected at least one core Requests file in top 10; got {sorted(top10)}"
+
+          print("Top 10:")
+          for row in results[:10]:
+              print(f'{row["score"]:.6f}  {row["path"]}')
+          PY
+
+      - name: Upload ranking
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-reranker-results
+          path: qwen3-reranker-results.json
